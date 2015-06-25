@@ -118,7 +118,7 @@ def get_training_data( file_img, file_mask, r ):
             continue
         patches = extract_patches2D( img[z], r, YX )
         patches = np.reshape( patches, (patches.shape[0],patches.shape[1]*patches.shape[2]) )
-        print patches.shape, YX.shape
+        #print patches.shape, YX.shape
         X.extend( patches )
         Y.extend( [1]*len(YX) )
 
@@ -132,7 +132,7 @@ def get_training_data( file_img, file_mask, r ):
             continue
         patches = extract_patches2D( img[z], r, YX )
         patches = np.reshape( patches, (patches.shape[0],patches.shape[1]*patches.shape[2]) )
-        print patches.shape, YX.shape
+        #print patches.shape, YX.shape
         X.extend( patches )
         Y.extend( [0]*len(YX) )
 
@@ -141,7 +141,7 @@ def get_training_data( file_img, file_mask, r ):
 XY = Parallel(n_jobs=args.cpu)(delayed(get_training_data)(file_img, file_mask, args.radius)
                          for file_img, file_mask in zip(args.img,args.mask) )
 
-print len(XY)
+#print len(XY)
 
 X = []
 Y = []
@@ -177,7 +177,7 @@ def mask_image( file_img, file_mask, ga, r, neigh, output_dir ):
     mask = irtk.ones( input_mask.get_header(), dtype='uint8' )
     mask[input_mask == 2] = 0
     for z in xrange(img.shape[0]):
-        print z
+        #print z
         YX = np.transpose( np.nonzero( mask[z] ) )
         if YX.shape[0] == 0:
             continue # this slice does not intersect the box
@@ -197,10 +197,9 @@ def mask_image( file_img, file_mask, ga, r, neigh, output_dir ):
         BV = get_BV( args.ga )
         box_volume = (z_max-z_min)*img.header['pixelSize'][2]*(y_max-y_min)*img.header['pixelSize'][1]*(x_max-x_min)*img.header['pixelSize'][0]
         ratio = float(BV) / float(box_volume)
-        print "ratio", ratio
-        q0,q1 = mquantiles( proba.flatten(), prob=[0.5*(1.0-ratio),
-                                                   1.0-0.5*ratio] )
-        print "threshold", q0,q1
+        #print "ratio", ratio
+        q0,q1 = mquantiles( proba.flatten(), prob=[0.5*(1.0-ratio), 1.0-0.5*ratio] )
+        #print "threshold", q0,q1
         #threshold = max(0.5,threshold)
     
         # labels = res[z_min:z_max+1,

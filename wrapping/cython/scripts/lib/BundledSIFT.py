@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 import cv2
-import sys,os
+import sys,os, os.path
 import csv
 import numpy as np
 from math import cos,sin
@@ -9,12 +9,15 @@ import math
 import irtk
 import argparse
 import ransac
+import dill
 
+from cv2 import MSER
 from glob import glob
 from sklearn import neighbors
 from sklearn import svm
 from sklearn.externals import joblib
 from joblib import Parallel, delayed
+
 
 ######################################################################
 
@@ -55,6 +58,240 @@ def get_BPD( ga ):
         BPD += bpd_model[3-k]*ga**k
     return BPD
 
+def slice_mser(detections, image_regions, z, img, classifier, OFD, max_e, N, svc, return_image_regions):
+    #f = open("/home/handong/motion-correction/auto-mask/mser.dill", "rb+")
+    #mser = dill.load(f)
+    #f.close()
+    
+    mser = cv2.MSER( _delta=5,
+                     _min_area=60,
+                     _max_area=14400,
+                     _max_variation=0.15,
+                     _min_diversity=.1,
+                     _max_evolution=200,
+                     _area_threshold=1.01,
+                     _min_margin=0.003,
+                     _edge_blur_size=5)
+    
+    sift = cv2.SIFT( nfeatures=0,
+                     nOctaveLayers=3,
+                     contrastThreshold=0.04,
+                     edgeThreshold=10,
+                     sigma=0.8)
+
+    siftExtractor = cv2.DescriptorExtractor_create("SIFT")
+    
+    detections.append([])
+    #image_regions.append([])
+    
+    # Extract MSER
+    #print "extracting mser"
+    contours = mser.detect(img[z,:,:])
+    #print "mser done"
+    
+    # Filter MSER
+    selected_mser = []
+    mask = np.zeros( (img.shape[1],img.shape[2]), dtype='uint8' )
+    #print "fitting ellipses"
+    for c in contours:
+        ellipse = cv2.fitEllipse(np.reshape(c, (c.shape[0],1,2) ).astype('int32'))
+        
+        # filter by size
+        if ( ellipse[1][0] > OFD
+             or ellipse[1][1] > OFD
+             or ellipse[1][0] < 0.5*OFD
+             or ellipse[1][1] < 0.5*OFD ) :
+            continue
+        
+        # filter by eccentricity
+        if math.sqrt(1-(np.min(ellipse[1])/np.max(ellipse[1]))**2) > max_e:
+            continue
+    
+        cv2.ellipse( mask, ellipse, 255, -1 )
+        selected_mser.append((c,ellipse))
+    
+    #print "ellipses done"
+    if len(selected_mser) == 0:
+        return []
+        #continue
+    
+    # Extract SIFT
+    #print "extracting SIFT"
+    keypoints = sift.detect(img[z,:,:],mask=mask)
+
+    if keypoints is None or len(keypoints) == 0:
+        #continue
+        return []
+    (keypoints, descriptors) = siftExtractor.compute(img[z,:,:],keypoints)
+    
+    # words = np.zeros(len(keypoints),dtype="int")
+    # for i,d in enumerate(descriptors):
+    #     words[i] = classifier.kneighbors(d, return_distance=False)
+    words = classifier.kneighbors(descriptors, return_distance=False)
+    #words, dist = flann.nn_index( descriptors.astype('float32') )
+        
+    for i,(c,ellipse) in enumerate(selected_mser):
+        # Compute histogram
+        hist = np.zeros(N, dtype='float')
+        for ki,k in enumerate(keypoints):
+            if is_in_ellipse(k.pt,ellipse):
+                hist[words[ki]] += 1
+                
+        # Normalize histogram
+        norm = np.linalg.norm(hist)
+        if norm > 0:
+            hist /= norm
+
+        cl = svc.predict(hist).flatten()
+
+        if cl == 1:
+            ellipse_center = [ellipse[0][0],ellipse[0][1],z]
+            #print c.shape
+            if return_image_regions:
+                #print image_regions[-1]
+                image_regions.append((ellipse_center,c))
+                #return image_regions
+                #image_regions[] = (ellipse_center,c)
+            else:
+                region = np.hstack( (c, [[z]]*c.shape[0]) )
+                detections[-1].append( (img.ImageToWorld(ellipse_center),
+                                        img.ImageToWorld(region)) )
+                #if(len(image_regions) > 0):
+    return image_regions
+                
+def parallel_detect_mser( raw_file,
+                 ga,
+                 vocabulary,
+                 mser_detector,
+                 NEW_SAMPLING,
+                 output_folder="debug",
+                 DEBUG=False,
+                 return_image_regions=False ):
+
+    OFD = get_OFD(ga) / NEW_SAMPLING
+    BPD = get_BPD(ga) / NEW_SAMPLING
+
+    max_e = 0.64
+
+    #mser = None
+    #if os.path.isfile('mser.dill') == False:
+    '''
+    mser = cv2.MSER( _delta=5,
+                     _min_area=60,
+                     _max_area=14400,
+                     _max_variation=0.15,
+                     _min_diversity=.1,
+                     _max_evolution=200,
+                     _area_threshold=1.01,
+                     _min_margin=0.003,
+                     _edge_blur_size=5)
+    #print mser
+    #dill.dumps(mser)
+        
+    sift = cv2.SIFT( nfeatures=0,
+                     nOctaveLayers=3,
+                     contrastThreshold=0.04,
+                     edgeThreshold=10,
+                     sigma=0.8)
+    siftExtractor = cv2.DescriptorExtractor_create("SIFT")
+    '''
+    voca = np.load( open(vocabulary, 'rb') )
+    classifier = neighbors.NearestNeighbors(1, algorithm='kd_tree')
+    N = voca.shape[0] 
+    classifier.fit(voca)
+    #flann = pyflann.FLANN()
+    #flann.build_index( voca.astype('float32') )
+    
+    svc = joblib.load(mser_detector)
+    
+    img = irtk.imread( raw_file, dtype='float32' )
+    img = img.resample2D( NEW_SAMPLING ).saturate().rescale().astype('uint8')
+    
+    detections = []
+    image_regions = []
+    image_regions = Parallel(n_jobs=32)(delayed(slice_mser)(detections, image_regions, z, img, classifier, OFD, max_e, N, svc, return_image_regions)
+                        for z in range(img.shape[0]))
+    
+    
+    
+    '''
+    for z in range(img.shape[0]):
+        detections.append([])
+        image_regions.append([])
+        
+        # Extract MSER
+        #print "extracting mser"
+        contours = mser.detect(img[z,:,:])
+        #print "mser done"
+                
+        # Filter MSER
+        selected_mser = []
+        mask = np.zeros( (img.shape[1],img.shape[2]), dtype='uint8' )
+        #print "fitting ellipses"
+        for c in contours:
+            ellipse = cv2.fitEllipse(np.reshape(c, (c.shape[0],1,2) ).astype('int32'))
+
+            # filter by size
+            if ( ellipse[1][0] > OFD
+                 or ellipse[1][1] > OFD
+                 or ellipse[1][0] < 0.5*OFD
+                 or ellipse[1][1] < 0.5*OFD ) :
+                continue
+            
+            # filter by eccentricity
+            if math.sqrt(1-(np.min(ellipse[1])/np.max(ellipse[1]))**2) > max_e:
+                continue
+
+            cv2.ellipse( mask, ellipse, 255, -1 )
+            selected_mser.append((c,ellipse))
+
+        #print "ellipses done"
+        if len(selected_mser) == 0:
+            continue
+
+        # Extract SIFT
+        #print "extracting SIFT"
+        keypoints = sift.detect(img[z,:,:],mask=mask)
+        #print "SIFT done"
+        if keypoints is None or len(keypoints) == 0:
+            continue
+        (keypoints, descriptors) = siftExtractor.compute(img[z,:,:],keypoints)
+
+        # words = np.zeros(len(keypoints),dtype="int")
+        # for i,d in enumerate(descriptors):
+        #     words[i] = classifier.kneighbors(d, return_distance=False)
+        words = classifier.kneighbors(descriptors, return_distance=False)
+        #words, dist = flann.nn_index( descriptors.astype('float32') )
+        
+        for i,(c,ellipse) in enumerate(selected_mser):
+            # Compute histogram
+            hist = np.zeros(N, dtype='float')
+            for ki,k in enumerate(keypoints):
+                if is_in_ellipse(k.pt,ellipse):
+                    hist[words[ki]] += 1
+
+            # Normalize histogram
+            norm = np.linalg.norm(hist)
+            if norm > 0:
+                hist /= norm
+
+            cl = svc.predict(hist).flatten()
+
+            if cl == 1:
+                ellipse_center = [ellipse[0][0],ellipse[0][1],z]
+                #print c.shape
+                if return_image_regions:
+                    image_regions[-1].append((ellipse_center,c))
+                else:
+                    region = np.hstack( (c, [[z]]*c.shape[0]) )
+                    detections[-1].append( (img.ImageToWorld(ellipse_center),
+                                            img.ImageToWorld(region)) )
+    '''
+    if return_image_regions:
+        return image_regions
+    else:
+        return detections
+    
 def detect_mser( raw_file,
                  ga,
                  vocabulary,
@@ -215,7 +452,7 @@ def detect_mser( raw_file,
 
             if cl == 1:
                 ellipse_center = [ellipse[0][0],ellipse[0][1],z]
-                print c.shape
+                #print c.shape
                 if return_image_regions:
                     image_regions[-1].append((ellipse_center,c))
                 else:
@@ -228,6 +465,7 @@ def detect_mser( raw_file,
             cv2.imwrite(output_folder + "/"+str(z) + "_color_mser.png",img_color_mser)
 
     if return_image_regions:
+        print len(image_regions)
         return image_regions
     else:
         return detections
@@ -323,7 +561,7 @@ def ransac_ellipses( detections,
     # run RANSAC algorithm
     ransac_fit, ransac_data = ransac.ransac( centers,model,
                                              5, nb_iterations, 10.0, 10, # misc. parameters
-                                             debug=True,return_all=True)
+                                             debug=False,return_all=True)
 
     if ransac_fit is None:
         print "RANSAC fiting failed"

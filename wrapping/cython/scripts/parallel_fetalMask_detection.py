@@ -12,12 +12,10 @@ import scipy.ndimage as nd
 
 import argparse
 
-# filename = sys.argv[1]
-# ga = float(sys.argv[2])
-# output_mask = sys.argv[3]
+from datetime import datetime
 
 parser = argparse.ArgumentParser(
-    description='Slice-by-slice detection of fetal brain MRI (3D).' )
+    description='Parallel slice-by-slice detection of fetal brain MRI (3D).' )
 parser.add_argument( "filename", type=str )
 parser.add_argument( "ga", type=float )
 parser.add_argument( "output_mask", type=str )
@@ -40,27 +38,18 @@ if output_dir != '' and not os.path.exists(output_dir):
 if output_dir == '':
     output_dir = '.'
 
-if os.environ['USER'] == "kevin":
-    raw_folder = "/home/kevin/Imperial/PhD/DATASETS/Originals/"
-    vocabulary = "/home/kevin/Imperial/PhD/MyPHD/Detection/BOW/pipeline2/LEARNING/vocabulary_"+args.fold+".npy"
-    mser_detector = "/home/kevin/Imperial/PhD/MyPHD/Detection/BOW/pipeline2/LEARNING/mser_detector_"+args.fold+"_linearSVM"
-    ga_file =  "/home/kevin/Imperial/PhD/MyPHD/Detection/BOW/pipeline2/LEARNING/metadata/ga.csv"
-else:
-    raw_folder = "/home/handong/example-motion-correction/data"
-    mser_detector = args.classifier
-    vocabulary = args.vocabulary
-    NEW_SAMPLING = args.new_sampling
-    #vocabulary = "/home/handong/example-motion-correction/model/vocabulary_"+args.fold+".npy"
-    #mser_detector = "/home/handong/example-motion-correction/model/mser_detector_"+args.fold+"_linearSVM"
-    #ga_file =  "/vol/biomedic/users/kpk09/pipeline2/LEARNING/metadata/ga.csv"
+raw_folder = "/home/handong/example-motion-correction/data"
+mser_detector = args.classifier
+vocabulary = args.vocabulary
+NEW_SAMPLING = args.new_sampling
 
-    print"Detect MSER regions"
 detections = []
-#NEW_SAMPLING = 0.8
 
 img = irtk.imread(filename, dtype="float32").saturate().rescale()
 
-image_regions = detect_mser( filename,
+print"Detect MSER regions"
+tstart = datetime.now()
+image_regions = parallel_detect_mser( filename,
                              ga,
                              vocabulary,
                              mser_detector,
@@ -68,6 +57,11 @@ image_regions = detect_mser( filename,
                              DEBUG=args.debug,
                              output_folder=output_dir,
                              return_image_regions=True)
+tend = datetime.now()
+tdiff = tend-tstart
+#print 'len: ', len(image_regions)
+#print image_regions
+print 'Time for detect_mser: ', tdiff.seconds, ' seconds'
 
 # flatten list
 # http://stackoverflow.com/questions/406121/flattening-a-shallow-list-in-python
@@ -91,15 +85,25 @@ def convert_input(image_regions):
 
     return detections
 
+tstart = datetime.now()
 detections = convert_input(image_regions)
-print detections
+tend = datetime.now()
+tdiff = tend-tstart
+print 'Time for convert_input: ', tdiff.seconds, ' seconds'
+
+#print detections
+tstart = datetime.now()
 (center, u, ofd), inliers = ransac_ellipses( detections,
                                              ga,
                                              nb_iterations=1000,
                                              model="box",
                                              return_indices=True )
+tend = datetime.now()
+tdiff = tend-tstart
+print 'Time for ransac_ellipses: ', tdiff.seconds, ' seconds'
 
 print "initial mask"
+tstart = datetime.now()
 mask = irtk.zeros(img.resample2D(NEW_SAMPLING, interpolation='nearest').get_header(),
                   dtype='uint8')
 
@@ -108,10 +112,13 @@ for i in inliers:
     mask[z,c[:,1],c[:,0]] = 1
 
 mask = mask.resample2D(img.header['pixelSize'][0], interpolation='nearest' )
+tend = datetime.now()
+tdiff = tend-tstart
+print 'Time: ', tdiff.seconds, ' seconds'
 
-# ellipse mask
+print ' ellipse mask'
+tstart = datetime.now()
 ellipse_mask = irtk.zeros(img.resample2D(NEW_SAMPLING, interpolation='nearest').get_header(), dtype='uint8')
-
 for i in inliers:
     (x,y,z), c = image_regions[i]
     ellipse = cv2.fitEllipse(np.reshape(c, (c.shape[0],1,2) ).astype('int32'))
@@ -125,8 +132,12 @@ ellipse_mask = ellipse_mask.resample2D(img.header['pixelSize'][0], interpolation
 #irtk.imwrite(output_dir + "/ellipse_mask.nii", ellipse_mask )
 
 mask[ellipse_mask == 1] = 1
+tend = datetime.now()
+tdiff = tend-tstart
+print 'Time: ', tdiff.seconds, ' seconds'
 
-# fill holes, close and dilate
+print 'fill holes, close and dilate'
+tstart = datetime.now()
 disk_close = irtk.disk( 5 )
 disk_dilate = irtk.disk( 2 )
 for z in xrange(mask.shape[0]):
@@ -148,8 +159,8 @@ z = int(round( z / img.header['pixelSize'][2] ))
 w = h = int(round( ofd / img.header['pixelSize'][0]))
 d = int(round( ofd / img.header['pixelSize'][2]))
 
-print z,y,x
-print w,h,d
+#print 'zyx ', z,y,x
+#print 'whd ', w,h,d
 
 # cropped = img[max(0,z-d/2):min(img.shape[0],z+d/2+1),
 #                max(0,y-h/2):min(img.shape[1],y+h/2+1),
@@ -164,5 +175,8 @@ neg_mask[max(0,z-d/2):min(img.shape[0],z+d/2+1),
 
 mask[neg_mask>0] = 2
 
-print mask, mask.max()
+#print mask, mask.max()
 irtk.imwrite(output_mask, mask )
+tend = datetime.now()
+tdiff = tend-tstart
+print 'Time: ', tdiff.seconds, ' seconds'
